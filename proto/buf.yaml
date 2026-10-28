@@ -1,0 +1,18 @@
+# 插件 ABI 的 proto 根：只有两棵子树
+#   abi/     —— 插件契约的数据定义（驱动元数据、提供者视图、枚举）
+#   plugin/  —— 线上服务定义（驱动插件 / 下载器插件）
+# 生成代码进 proto/gen/ 并入库：本仓库是对外发布的 SDK，消费方不该为了 go build
+# 去装 buf/protoc（对比宿主仓库：那边的 proto/gen 是纯本地产物，不入库）。
+version: v2
+modules:
+  - path: .
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_VERSION_SUFFIX
+    - ENUM_VALUE_PREFIX
+    - RPC_REQUEST_RESPONSE_UNIQUE
+breaking:
+  use:
+    - FILE

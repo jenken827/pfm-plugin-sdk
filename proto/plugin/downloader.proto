@@ -1,0 +1,147 @@
+syntax = "proto3";
+
+package plugin;
+
+// 下载器插件协议（kind=downloader）：离线下载后端。
+//
+// 与驱动插件共用传输约定（loopback HTTP、POST /rpc/<Method>、protojson、
+// PFM_PLUGIN_TOKEN 鉴权）和协议版本，但方法集完全不同：
+//
+//   - 插件只负责「提交任务 / 查进度 / 取消」这一层，替宿主对接真正的下载器
+//     （aria2 / qBittorrent / …）；
+//   - 产物文件落在宿主机上（插件与宿主同机），完成后的入库——算 blake3、
+//     建 File 记录、分发到各 provider——仍然由宿主做。
+//
+// 为什么不留推送：宿主用周期对齐（reconcile）拿状态就够了，进度本来也是
+// 轮询的；少一条推送通道就少一套重连 / 补发逻辑。
+//
+// 数值一律用十进制字符串（length / total_length …）：不同后端原生类型不同
+// （aria2 返回字符串、qBittorrent 返回整数），由插件统一格式化，宿主只解析。
+
+import "plugin/driver.proto";
+
+option go_package = "github.com/jenken827/pfm-plugin-sdk/proto/gen/plugin";
+
+// 下载器插件必须实现的接口（方法名即 /rpc/<Method>）。
+//
+//   Describe           自报家门（abi_version / downloader_id）
+//   Configure          初始化后端连接（宿主配置 downloader.options 下发）
+//   AddDownload        按 URL 列表提交任务，返回任务 id（后端方言里的 gid）
+//   TellStatus         查单个任务
+//   ListTasks          按状态列任务（宿主周期对齐用）
+//   Remove             停止任务（保留结果）
+//   RemoveResult       删除任务结果
+//   Version            后端版本号（仅日志）
+
+message DownloaderDescribeResp {
+  optional uint32 abi_version = 1;
+  optional string plugin_name = 2;
+  optional string plugin_version = 3;
+  // 本插件提供的下载器身份（如 aria2），须与 plugin.json 的 downloader_id 一致
+  optional string downloader_id = 4;
+}
+
+message DownloaderConfigureReq {
+  // 后端选项，原样来自宿主配置里的 downloader.options
+  // （aria2：endpoint / token / timeout）
+  map<string, string> options = 1;
+  optional HostEndpoint host = 2;
+}
+
+message DownloaderConfigureResp {
+  // 连上后端后回报的版本（如 aria2 1.37.0），仅用于日志与「配置是否可用」提示
+  optional string backend_version = 1;
+}
+
+// DownloadStatus 任务状态（后端各自的状态归一到这里）
+enum DownloadStatus {
+  DOWNLOAD_STATUS_UNSPECIFIED = 0;
+  // 排队中（后端里的 waiting / queued / stalled）
+  DOWNLOAD_STATUS_WAITING = 1;
+  // 正在传输
+  DOWNLOAD_STATUS_ACTIVE = 2;
+  // 用户暂停
+  DOWNLOAD_STATUS_PAUSED = 3;
+  // 正常完成，产物在 files[].path
+  DOWNLOAD_STATUS_COMPLETE = 4;
+  // 失败，原因在 error_message
+  DOWNLOAD_STATUS_ERROR = 5;
+  // 被移除
+  DOWNLOAD_STATUS_REMOVED = 6;
+}
+
+message DownloadURI {
+  optional string uri = 1;
+  // 该 URI 的使用状态（后端方言，仅展示）
+  optional string status = 2;
+}
+
+message DownloadFile {
+  // 宿主机上的路径（下载器写入的实际位置，绝对路径）
+  optional string path = 1;
+  optional string length = 2;
+  optional string completed_length = 3;
+  // "true" / "false"：BT 任务里用户是否勾选了这个文件
+  optional string selected = 4;
+  repeated DownloadURI uris = 5;
+}
+
+message DownloadTask {
+  // 后端方言里的任务 id（aria2 的 gid），宿主只当不透明字符串存
+  optional string gid = 1;
+  optional DownloadStatus status = 2;
+  // 下载目录（宿主机绝对路径），宿主用它解析相对文件名
+  optional string dir = 3;
+  optional string total_length = 4;
+  optional string completed_length = 5;
+  optional string download_speed = 6;
+  // BT 任务的 infohash（小写十六进制），用于跨进程重启后重新关联
+  optional string info_hash = 7;
+  optional string error_code = 8;
+  optional string error_message = 9;
+  // 由本任务派生出的任务 id（磁力先下元数据再派生产物任务）；
+  // 后端没有这个概念就留空
+  repeated string followed_by = 10;
+  // 种子的显示名（BT 任务才有），宿主用它给顶层目录命名
+  optional string torrent_name = 11;
+  repeated DownloadFile files = 12;
+}
+
+message AddDownloadReq {
+  repeated string uris = 1;
+  // 后端无关的通用选项：dir（下载目录）、out（文件名）等
+  map<string, string> options = 2;
+}
+
+message AddDownloadResp {
+  optional string gid = 1;
+}
+
+message TellStatusReq {
+  optional string gid = 1;
+}
+
+message TellStatusResp {
+  optional DownloadTask task = 1;
+}
+
+message ListTasksReq {
+  // 要列的状态；为空表示「全部」（含等待 / 进行 / 已停止）
+  repeated DownloadStatus states = 1;
+}
+
+message ListTasksResp {
+  repeated DownloadTask tasks = 1;
+}
+
+message RemoveTaskReq {
+  optional string gid = 1;
+}
+
+message RemoveTaskResp {}
+
+message DownloaderVersionReq {}
+
+message DownloaderVersionResp {
+  optional string version = 1;
+}

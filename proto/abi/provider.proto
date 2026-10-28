@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+// 宿主下发给驱动的提供者视图。
+//
+// 刻意不复用宿主应用侧的 StorageProvider 实体：那个消息是数据库表的镜像
+// （时间戳、容量统计、deleted_at…），与驱动无关；把它当 ABI 会让每次应用侧
+// 加字段都变成插件协议变更。这里只放驱动真正要用的东西：
+//   - config 是驱动私有配置的**原文**（不透明 JSON，结构由驱动自己定义）
+//   - 其余是宿主算好的提供者级设置（加密、并发、hash 类型、代理）
+package abi;
+
+import "abi/enums.proto";
+
+option go_package = "github.com/jenken827/pfm-plugin-sdk/proto/gen/abi";
+
+message Provider {
+  // 存储提供者主键（token 回写、缓存状态上报要用）
+  optional uint32 id = 1;
+  // 驱动身份（如 local / baidu）
+  optional string driver_id = 2;
+  // 实例名（仅用于日志与报错）
+  optional string name = 3;
+  // 驱动私有配置原文（不透明 JSON）
+  optional string config = 4;
+  // 是否启用（宿主已决定不启用时不会下发实例）
+  optional bool enabled = 5;
+  // 优先级（数字越小越优先）
+  optional uint32 sort_order = 6;
+  // 单文件大小限制（0 = 不限）
+  optional uint64 file_size_limit = 7;
+  // 最大并发上传数（0 = 用全局默认）
+  optional uint32 max_concurrent_uploads = 8;
+  // 内容哈希类型（驱动上传时按它算 Hash / ChunkHash）
+  optional HashType hash_type = 9;
+  // 加密密钥（为空表示该 provider 不加密）
+  optional string encryption_key = 10;
+  // 加密文件后缀
+  optional string encryption_suffix = 11;
+  // HTTP 代理（网络类驱动建 client 时用，可为空）
+  optional string proxy = 12;
+}

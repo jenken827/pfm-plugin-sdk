@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: 格式检查
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: 构建
+        run: go build ./...
+
+      - name: 测试
+        run: go test ./...
+
+      # 生成代码入库是为了让消费方不必装 buf；代价是必须防止它和 .proto 漂移。
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: "1.66.0"
+
+      - name: 校验生成代码与 proto 同步
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          ( cd proto && buf generate )
+          git diff --exit-code -- proto/gen || {
+            echo "::error::proto/gen 与 .proto 不一致，请在本地跑 ./dev.sh proto 并提交" >&2
+            exit 1
+          }

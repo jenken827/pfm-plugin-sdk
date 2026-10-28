@@ -1,0 +1,10 @@
+version: v2
+# clean: true 会先清空输出目录；proto/gen 是生成物，可以整体重建
+clean: true
+plugins:
+  - local: protoc-gen-go
+    out: gen
+    opt:
+      - paths=source_relative
+inputs:
+  - directory: .

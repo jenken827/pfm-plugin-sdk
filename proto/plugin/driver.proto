@@ -1,0 +1,245 @@
+syntax = "proto3";
+
+package plugin;
+
+// 驱动插件协议（宿主 <-> 插件子进程）。
+//
+// 传输：插件监听 loopback，宿主连上去用 HTTP 调这里定义的接口：
+//   - 一元方法：POST /rpc/<method>，请求/响应体为 protojson，错误用 Error 消息（HTTP 4xx/5xx）
+//   - Open：POST /rpc/Open，响应体是裸字节流（不包帧，靠 HTTP chunked 分片）
+// 本文件只定义数据结构；路由表在插件 SDK（plugin/sdk）里显式维护，
+// 与 server/route_table.go 的 REST 风格一致，不引 connect/grpc 代码生成。
+//
+// 版本与兼容：ABI_VERSION 不一致时宿主拒绝加载插件。新增可选能力必须同时
+// 增加 abi.DriverCapability 枚举值，并让宿主按能力做类型断言。
+//
+// 依赖：abi/*.proto 是本契约的数据定义（驱动元数据、提供者视图、枚举），
+// 本文件只定义线上方法与它们的组合，不含业务数据结构。
+
+import "google/protobuf/timestamp.proto";
+import "abi/driver.proto";
+import "abi/enums.proto";
+import "abi/provider.proto";
+
+option go_package = "github.com/jenken827/pfm-plugin-sdk/proto/gen/plugin";
+
+// 插件协议版本。破坏性变更必须递增，宿主与插件不一致时拒绝加载。
+enum AbiVersion {
+  ABI_VERSION_UNSPECIFIED = 0;
+  ABI_VERSION_1 = 1;
+}
+
+message Empty {}
+
+// 错误响应体（一元方法出错时返回，HTTP 状态码见 sdk 实现）
+message Error {
+  // 语义化错误码：AUTH_EXPIRED / NOT_FOUND / RATE_LIMITED / INVALID /
+  // TRANSIENT / INTERNAL（宿主只区分"可重试/不可重试"两档）
+  optional string code = 1;
+  optional string message = 2;
+}
+
+// —— 握手与配置 ——
+
+message DescribeReq {}
+
+message DescribeResp {
+  optional uint32 abi_version = 1;
+  optional string plugin_name = 2;
+  optional string plugin_version = 3;
+  // 本插件提供的驱动身份（权威值取自 metadata.driver_id，这里冗余一份便于快速校验）
+  optional string driver_id = 4;
+  // 声明能力；必须与实例实际实现的接口一致（宿主按此做类型断言）
+  repeated abi.DriverCapability capabilities = 5;
+  // 驱动元数据（名称/图标/配置字段/能力），替换内置同名驱动的元数据
+  optional abi.DriverInfo metadata = 6;
+}
+
+// 宿主的反向调用入口（插件回调宿主时使用）
+message HostEndpoint {
+  optional string addr = 1;
+  optional string token = 2;
+}
+
+message ConfigureReq {
+  optional uint32 provider_id = 1;
+  // 提供者视图：驱动私有配置（不透明 JSON）+ 宿主算好的加密/限流等配置
+  optional abi.Provider provider = 2;
+  optional HostEndpoint host = 3;
+}
+
+message ConfigureResp {
+  // 该实例实际实现的能力（SDK 按接口断言得出），宿主据此决定代理暴露哪些可选接口
+  repeated abi.DriverCapability capabilities = 1;
+}
+
+message CloseReq {
+  optional uint32 provider_id = 1;
+}
+
+// —— 数据面 ——
+
+// 加密参数：provider 配了 encryption_key 时下发，插件用公共包
+// driver/cryptostream 重建与宿主一致的加密器
+message Encryption {
+  optional string key = 1;
+  optional string salt = 2;
+}
+
+// 与 driver/types.FileRef 一一对应（跨进程必须是可序列化的值类型）
+//
+// FileRef 里的 name/path 等字段是驱动自己的命名空间，宿主只透传；location_id
+// 是宿主 DB 主键，驱动只用来回报删除/缓存结果，不要拿它做业务判断。
+message FileRef {
+  optional uint64 location_id = 1;
+  optional string provider_file_id = 2;
+  optional string name = 3;
+  optional string path = 4;
+  optional uint64 size = 5;
+  optional uint64 chunk_size = 6;
+  optional string hash = 7;
+  optional string chunk_hash = 8;
+  optional uint32 chunk_number = 9;
+  optional string channel_id = 10;
+  optional int32 message_id = 11;
+  optional abi.CacheStatus cache_status = 12;
+}
+
+message UploadReq {
+  optional uint32 provider_id = 1;
+  // 宿主侧临时文件的绝对路径：插件与宿主同机，直接打开即可，
+  // 大文件不经过 RPC（这是本方案成立的前提）
+  optional string temp_path = 2;
+  optional string file_name = 3;
+  optional uint64 file_size = 4;
+  // 明文 blake3（仅日志/追踪用）
+  optional string file_hash = 5;
+  optional bool obfuscate = 6;
+  optional string encryption_suffix = 7;
+  optional Encryption encryption = 8;
+}
+
+message UploadResp {
+  // 返回的文件引用：Hash / ChunkHash / ChunkSize 必须填齐，
+  // 否则宿主的去重、秒传与按 hash 读取都会失效
+  repeated FileRef refs = 1;
+}
+
+message OpenReq {
+  optional uint32 provider_id = 1;
+  // 该文件在当前 provider 上的所有分片引用（已按 chunk_number 排序）
+  repeated FileRef refs = 2;
+  // 起始偏移（Seek 语义：宿主换 offset 重开一条流）
+  optional int64 offset = 3;
+  // 读取长度；0 表示读到末尾
+  optional int64 limit = 4;
+  optional Encryption encryption = 5;
+}
+
+// Open 的响应是流：data 逐块下发（HTTP chunked）。
+// 单个 data 帧建议 256KB~1MB，避免每帧一次系统调用。
+message Bytes {
+  optional bytes data = 1;
+}
+
+message BatchDeleteReq {
+  optional uint32 provider_id = 1;
+  repeated FileRef refs = 2;
+}
+
+message DeleteResult {
+  optional uint64 location_id = 1;
+  optional bool success = 2;
+  optional string error = 3;
+  // 重试也不会成功的失败（平台硬限制 / 参数错误）：驱动自己判断，宿主据此只记
+  // warning，不按错误文案或驱动身份猜。
+  optional bool permanent = 4;
+}
+
+message BatchDeleteResp {
+  repeated DeleteResult results = 1;
+}
+
+message ListRemoteReq {
+  optional uint32 provider_id = 1;
+  optional string dir = 2;
+}
+
+message RemoteEntry {
+  optional string path = 1;
+  optional string name = 2;
+  optional string id = 3;
+  optional bool is_dir = 4;
+  optional int64 size = 5;
+}
+
+message ListRemoteResp {
+  repeated RemoteEntry entries = 1;
+}
+
+message RemoteRootReq {
+  optional uint32 provider_id = 1;
+}
+
+message RemoteRootResp {
+  optional string path = 1;
+}
+
+message DirectLinkReq {
+  optional uint32 provider_id = 1;
+  optional FileRef ref = 2;
+}
+
+message DirectLinkResp {
+  optional string url = 1;
+  // 客户端必须原样携带的请求头（百度/天翼要求 UA）
+  map<string, string> headers = 2;
+  optional google.protobuf.Timestamp expires_at = 3;
+  optional bool supports_range = 4;
+}
+
+message PreDownloadReq {
+  optional uint32 provider_id = 1;
+  repeated FileRef refs = 2;
+}
+
+message PunchReq {}
+
+// —— 反向调用（插件 -> 宿主 HostServices）——
+
+message UpdateProviderConfigReq {
+  optional uint32 provider_id = 1;
+  // 完整配置 JSON（token 轮换后必须回写，否则会丢唯一可用凭据）
+  optional string config_json = 2;
+}
+
+message UpdateCacheStatusReq {
+  optional uint64 location_id = 1;
+  optional abi.CacheStatus status = 2;
+}
+
+message LogReq {
+  // debug / info / warn / error
+  optional string level = 1;
+  optional string message = 2;
+}
+
+// 一元方法集合（Open 是流，单独列在注释里；路由由 sdk 显式维护）
+service DriverPlugin {
+  rpc Describe (DescribeReq) returns (DescribeResp);
+  rpc Configure (ConfigureReq) returns (ConfigureResp);
+  rpc Close (CloseReq) returns (Empty);
+  rpc Upload (UploadReq) returns (UploadResp);
+  rpc BatchDelete (BatchDeleteReq) returns (BatchDeleteResp);
+  rpc ListRemote (ListRemoteReq) returns (ListRemoteResp);
+  rpc RemoteRoot (RemoteRootReq) returns (RemoteRootResp);
+  rpc DirectLink (DirectLinkReq) returns (DirectLinkResp);
+  rpc PreDownload (PreDownloadReq) returns (Empty);
+  rpc Punch (PunchReq) returns (Empty);
+}
+
+service HostServices {
+  rpc UpdateProviderConfig (UpdateProviderConfigReq) returns (Empty);
+  rpc UpdateCacheStatus (UpdateCacheStatusReq) returns (Empty);
+  rpc Log (LogReq) returns (Empty);
+}

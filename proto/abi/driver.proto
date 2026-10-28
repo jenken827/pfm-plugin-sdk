@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+// 驱动元数据：插件在 Describe 里回给宿主，宿主据此注册驱动身份、渲染配置表单、
+// 决定可用能力。新增配置项只需要改插件自己的 ConfigField 声明与配置结构，本文件
+// 里的消息定义只在 ABI 需要变化时才动。
+package abi;
+
+import "abi/enums.proto";
+
+option go_package = "github.com/jenken827/pfm-plugin-sdk/proto/gen/abi";
+
+// ConfigSelectOption 下拉选择项
+message ConfigSelectOption {
+  // 提交时的值
+  string value = 1;
+  // 显示文本
+  string label = 2;
+}
+
+// ConfigField 配置字段声明
+//
+// name 必须与驱动配置结构体的 JSON key 逐字一致：宿主按 name 拼配置 JSON、
+// 回填表单，驱动按 name 解析。两边不一致的表现是「表单填了但驱动读不到」。
+message ConfigField {
+  // 字段名（提交时的 JSON key）
+  optional string name = 1;
+  // 字段类型
+  optional ConfigFieldType field_type = 2;
+  // 显示标签
+  optional string label = 3;
+  // 占位提示
+  optional string placeholder = 4;
+  // 帮助文本
+  optional string helper_text = 5;
+  // 是否必填
+  optional bool required = 6;
+  // 默认值（JSON 文本）
+  optional string default_value = 7;
+  // 校验规则（正则）
+  optional string validation_pattern = 8;
+  // 校验失败提示
+  optional string validation_message = 9;
+  // 下拉选项（SELECT 用）
+  repeated ConfigSelectOption select_options = 10;
+  // 图标标识
+  optional string icon_name = 11;
+  // 输入类型（text / password / number …）
+  optional string input_type = 12;
+  // 最大长度（字符串）
+  optional int32 max_length = 13;
+  // 最小值（数字）
+  optional double min_value = 14;
+  // 最大值（数字）
+  optional double max_value = 15;
+  // 多行行数（文本域；密码态恒单行）
+  optional int32 multiline_rows = 16;
+}
+
+// DriverInfo 驱动元数据
+message DriverInfo {
+  // 驱动身份（稳定字符串，发布后不可改）
+  optional string driver_id = 1;
+  // 类型名（历史字段，多数驱动与 driver_id 相同）
+  optional string name = 2;
+  // 显示名
+  optional string display_name = 3;
+  // 描述
+  optional string description = 4;
+  // 图标标识
+  optional string icon_name = 5;
+  // 配置字段
+  repeated ConfigField config_fields = 6;
+  // 声明的能力
+  repeated DriverCapability capabilities = 7;
+}

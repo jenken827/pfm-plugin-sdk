@@ -1,0 +1,11 @@
+# 编译产物（SDK 是个库，正常不会有，防止本地试验留下）
+/pfm-plugin-sdk
+*.test
+*.out
+coverage*
+
+# 注意：proto/gen/ 是**生成后入库**的，不要加进来
+
+# 本地工作区文件（联调时用 go work init 生成，不入库）
+go.work
+go.work.sum

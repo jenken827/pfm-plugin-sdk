@@ -1,0 +1,78 @@
+syntax = "proto3";
+
+// 驱动插件 ABI 的枚举。
+//
+// 这些枚举属于**插件契约**（宿主与插件进程之间的线上格式），与宿主应用侧的
+// proto/wsp/native 里同名/相似的枚举是两套东西：应用侧可以随功能演进，这里只随
+// ABI 版本变。改动顺序：先改本文件 → 重新生成 → 同步宿主与插件仓库。
+package abi;
+
+option go_package = "github.com/jenken827/pfm-plugin-sdk/proto/gen/abi";
+
+// AbiVersion 插件与宿主之间的协议版本
+//
+// 握手行（PFM-PLUGIN|<abi>|<addr>|<pid>）与 Describe 响应都带它，宿主校验不一致
+// 就拒绝加载。加字段 / 加枚举值不升版本；删字段、改字段语义、改方法签名才升。
+enum AbiVersion {
+  ABI_VERSION_UNSPECIFIED = 0;
+  ABI_VERSION_1 = 1;
+}
+
+// DriverCapability 驱动可选能力
+//
+// 驱动在 DriverInfo.capabilities 里静态声明，宿主据此决定是否把它当作
+// types.BatchDeleter / types.DirectLinker / types.RemoteLister /
+// types.PreDownloader 使用。声明必须与实现一致：多声明会把不支持的操作派进来，
+// 少声明则能力对上层不可见。
+//
+// 注意：这里没有「加密」能力 —— 加密由宿主下发 key/salt，驱动只负责按给定的
+// Encryptor 读写，与能力无关。
+enum DriverCapability {
+  DRIVER_CAPABILITY_UNSPECIFIED = 0;
+  // BatchDeleter：批量删除远程对象
+  DRIVER_CAPABILITY_BATCH_DELETE = 1;
+  // DirectLinker：签发客户端可直连的下载直链
+  DRIVER_CAPABILITY_DIRECT_LINK = 2;
+  // RemoteLister：枚举远端对象（cleanup-storage-orphans 依赖）
+  DRIVER_CAPABILITY_REMOTE_LIST = 3;
+  // PreDownloader：大文件预缓存
+  DRIVER_CAPABILITY_PREDOWNLOAD = 4;
+}
+
+// ConfigFieldType 配置字段类型
+//
+// 决定前端渲染什么控件，也决定提交上来的 JSON 值是什么类型。NUMBER 字段在
+// 部分客户端会以字符串提交，驱动侧统一用 sdk.FormNum 解析。
+enum ConfigFieldType {
+  CONFIG_FIELD_TYPE_UNSPECIFIED = 0;
+  STRING = 1;
+  NUMBER = 2;
+  BOOLEAN = 3;
+  SELECT = 4;
+  STRING_LIST = 5;
+}
+
+// HashType 存储提供者声明的内容哈希类型
+//
+// 驱动上传时按它计算 Hash / ChunkHash，宿主据此做去重、秒传与按 hash 读取。
+enum HashType {
+  HASH_TYPE_UNSPECIFIED = 0;
+  MD5 = 1;
+  SHA1 = 2;
+  SHA256 = 3;
+  SHA512 = 4;
+  BLAKE2B = 5;
+  BLAKE2S = 6;
+  BLAKE3 = 7;
+}
+
+// CacheStatus 远端缓存状态（仅支持预缓存能力的驱动使用，如 Telegram）
+enum CacheStatus {
+  CACHE_STATUS_UNSPECIFIED = 0;
+  // 未缓存，需要预缓存
+  UNCACHED = 1;
+  // 缓存中
+  CACHING = 2;
+  // 缓存完成，可直接读取
+  CACHED = 3;
+}
