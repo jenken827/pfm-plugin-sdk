@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package plugin;
+
+// 工具插件协议（kind=tool）：给 MCP 客户端扩展工具。
+//
+// 与驱动 / 下载器插件共用传输约定（loopback HTTP、POST /rpc/<Method>、protojson、
+// PFM_PLUGIN_TOKEN 鉴权、同一份 abi_version），但职责只有两件事：
+//
+//   - Describe：自报家门 + 提供哪些工具（名字 / 描述 / 入参 JSON Schema / 只读标记）；
+//   - Call：执行一次工具调用，返回内容块（文本 / 图片）。
+//
+// 边界（有意如此）：
+//
+//   - MCP 的 HTTP 入口、协议版本协商、头体一致性校验、令牌 scope、写开关、审计
+//     全在宿主核心；插件看不到客户端、看不到令牌，也不许自己起对外的端口。
+//   - 工具在 MCP 里的名字是 `<tool_id>.<name>`，`tool_id` 取自 plugin.json。
+//   - 插件拿不到宿主的数据库 / 存储；需要文件内容时用 access_token 调宿主
+//     ReadFile——宿主按「本次调用方」重新解析 scope，插件无法借自己的身份越权。
+
+import "plugin/driver.proto";
+
+option go_package = "github.com/jenken827/pfm-plugin-sdk/proto/gen/plugin";
+
+// 工具插件必须实现的接口（方法名即 /rpc/<Method>）。
+//
+//   Describe    自报家门（abi_version / tool_id）+ 工具清单
+//   Call        执行一次工具调用
+//
+// 宿主侧还提供一个可选回调（插件按需调用）：
+//
+//   ReadFile    按本次调用的 access_token 读文件字节（有上限）
+
+message ToolDescribeResp {
+  optional uint32 abi_version = 1;
+  optional string plugin_name = 2;
+  optional string plugin_version = 3;
+  // 本插件提供的工具身份（如 imageinfo），须与 plugin.json 的 tool_id 一致
+  optional string tool_id = 4;
+  repeated ToolSpec tools = 5;
+}
+
+// ToolSpec 一个工具的元数据，宿主原样并进 MCP 的 tools/list。
+message ToolSpec {
+  // 工具名（不含 tool_id 前缀），小写字母开头，只含小写字母 / 数字 / 下划线
+  optional string name = 1;
+  // 展示名（可空，客户端没有就显示 name）
+  optional string title = 2;
+  // 给模型看的说明：做什么、什么时候用、返回什么
+  optional string description = 3;
+  // 入参 JSON Schema（对象根）。宿主解析后下发给客户端，调用前做基础校验
+  optional string input_schema = 4;
+  // 只读工具：为 false 时宿主按「写开关 + 令牌写权限」过滤
+  optional bool read_only = 5;
+  // 破坏性（删除 / 覆盖），客户端据此提示用户
+  optional bool destructive = 6;
+  // 幂等（重复调用结果一致）
+  optional bool idempotent = 7;
+}
+
+// ToolCaller 本次调用的调用方（宿主填，只读）。
+message ToolCaller {
+  // 用户 id（宿主侧是 UUID 字符串，别用整数承载）
+  optional string user_id = 1;
+  optional string user_name = 2;
+  // 令牌 id（用登录 JWT 调试时为 0）
+  optional uint64 token_id = 3;
+  optional string token_name = 4;
+  // 令牌可见根目录（空 = 不限），插件的路径入参应以此为视角根
+  optional string root_folder_id = 5;
+  // 宿主为本次调用签发的短期凭据：调 ReadFile 时原样回传
+  optional string access_token = 6;
+  optional int64 expires_at = 7;
+}
+
+message CallToolReq {
+  // 工具名（不带 tool_id 前缀）
+  optional string name = 1;
+  // 调用参数原文（JSON 对象文本，来自 MCP tools/call 的 arguments）
+  optional string arguments_json = 2;
+  optional ToolCaller caller = 3;
+  // 回调宿主的地址与 token（插件按需使用）
+  optional HostEndpoint host = 4;
+}
+
+message CallToolResp {
+  // 结果内容块，按顺序拼给客户端
+  repeated ToolContent content = 1;
+  // 工具级失败（对应 MCP 的 result.isError），不是协议错误
+  optional bool is_error = 2;
+}
+
+enum ToolContentType {
+  TOOL_CONTENT_TYPE_UNSPECIFIED = 0;
+  TOOL_CONTENT_TYPE_TEXT = 1;
+  TOOL_CONTENT_TYPE_IMAGE = 2;
+}
+
+message ToolContent {
+  optional ToolContentType type = 1;
+  // 文本块
+  optional string text = 2;
+  // 图片块（protojson 里是 base64）
+  optional bytes data = 3;
+  optional string mime_type = 4;
+}
+
+message ReadFileReq {
+  // 来自 CallToolReq.caller.access_token
+  optional string access_token = 1;
+  // 文件 id（宿主侧不透明字符串）
+  optional string file_id = 2;
+  // 起始偏移（0 表示从头）
+  optional uint64 offset = 3;
+  // 本次最多读多少字节；为空或超过宿主上限时按上限截断
+  optional uint32 max_bytes = 4;
+}
+
+message ReadFileResp {
+  optional bytes data = 1;
+  // 声明的 MIME（可能为空，插件自己按扩展名兜底）
+  optional string mime_type = 2;
+  optional string filename = 3;
+  // 文件全长（明文长度）
+  optional uint64 size = 4;
+  // data 是否被截断（实际只返回了一段）
+  optional bool truncated = 5;
+}

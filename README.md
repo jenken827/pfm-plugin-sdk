@@ -1,12 +1,13 @@
 # pfm-plugin-sdk
 
-pfm 插件 SDK：**驱动插件与宿主程序之间唯一的契约**。
+pfm 插件 SDK：**插件与宿主程序之间唯一的契约**。
 
-pfm 的存储驱动、离线下载后端都可以编译成独立进程（插件），宿主通过 loopback HTTP +
-protojson 调用它们。这个仓库提供插件那一侧需要的全部东西：
+pfm 的存储驱动、离线下载后端、MCP 工具都可以编译成独立进程（插件），宿主通过 loopback HTTP +
+protojson 调用它们。三种 kind 共用同一套传输约定与 ABI 版本：`driver`（存储驱动）、
+`downloader`（离线下载后端）、`tool`（给 MCP 客户端扩展工具）。这个仓库提供插件那一侧需要的全部东西：
 
 - **ABI 数据定义**（proto）：驱动元数据、配置项、提供者视图、文件引用、枚举
-- **线上服务定义**（proto）：`DriverService` / `DownloaderService` 的方法与消息
+- **线上服务定义**（proto）：`driver` / `downloader` / `tool` 三种的方法集与消息
 - **Go 值类型**：`driver/types` 里的 `StorageDriver` 接口、`FileRef`、`Provider`、配置解析……
 - **插件运行时**：`plugin/sdk` 负责握手、Bearer 鉴权、RPC 分发、日志出口
 
@@ -30,11 +31,11 @@ proto（前端表单渲染、REST 响应、ORM 实体），那是宿主的事，
 | 路径 | 内容 |
 |---|---|
 | `proto/abi/` | 插件契约的数据定义：`driver.proto`（驱动元数据 / 配置项 / 文件引用）、`provider.proto`（提供者视图）、`enums.proto`（哈希、缓存状态、能力、配置项类型） |
-| `proto/plugin/` | 线上服务：`driver.proto`（`DriverService`）、`downloader.proto`（`DownloaderService`） |
+| `proto/plugin/` | 线上服务：`driver.proto`、`downloader.proto`、`tool.proto`（方法名即 `POST /rpc/<Method>`，路由在 `plugin/sdk` 里显式维护） |
 | `proto/gen/` | 由上面两棵子树生成的 Go 代码。**入库**（见「生成代码」） |
 | `driver/types/` | 驱动要实现的值类型：`StorageDriver` 接口、`Provider`、`FileRef`、配置解析、上传分片辅助、加密流、文件名处理 |
 | `pkg/crypt/` | 文件名加密（供驱动读写加密文件名使用） |
-| `plugin/sdk/` | 插件进程运行时：`Serve` / `MustServe` |
+| `plugin/sdk/` | 插件进程运行时：`Serve`（驱动）、`ServeDownloader`、`ServeTool` 及各自的 `Must*` |
 | `plugin/sdk/logx/` | 插件日志（logrus，写 stderr，由宿主转发） |
 
 ## 最小插件
@@ -67,6 +68,40 @@ JSON，键名与 `ConfigField.Name` 一致）、`Config`（已解析好的配置
 配置，宿主管不着里面有什么。
 
 配置项的值一律按字符串提交（前端表单就是这么发的），数字字段用 `sdk.FormNum` 兼容 `3` 与 `"3"`。
+
+## 工具插件（MCP）
+
+`kind=tool` 的插件给 pfm 的 MCP 服务扩展工具。MCP 的 HTTP 入口、协议版本协商、令牌
+scope、写开关与审计全在宿主核心，插件只提供「工具清单 + 执行逻辑」：
+
+```go
+// main.go
+func main() {
+    sdk.MustServeTool("imageinfo", sdk.Tool{
+        Name:        "describe",
+        Description: "读出图片的尺寸与格式",
+        InputSchema: `{"type":"object","properties":{"file_id":{"type":"string"}},"required":["file_id"]}`,
+        ReadOnly:    true,
+        Call: func(ctx context.Context, in *sdk.ToolCall) (sdk.ToolResult, error) {
+            var args struct {
+                FileID string `json:"file_id"`
+            }
+            if err := in.ArgumentsJSON(&args); err != nil {
+                return sdk.ErrorResult("参数不合法：%v", err), nil
+            }
+            data, err := in.ReadFile(ctx, args.FileID, 0, 4<<20) // 宿主按调用方 scope 鉴权
+            if err != nil {
+                return sdk.ErrorResult("读取失败：%v", err), nil
+            }
+            return sdk.TextResult(fmt.Sprintf("%d 字节", len(data.GetData()))), nil
+        },
+    })
+}
+```
+
+工具在 MCP 里暴露为 `<tool_id>.<name>`（这里是 `imageinfo.describe`）。插件拿不到宿主的
+数据库 / 存储；需要文件内容时走 `in.ReadFile`，宿主会用这次调用的 `access_token` 重新
+解析调用方与 scope，插件无法越权读别人的文件。
 
 ## 依赖约束（硬规则）
 
